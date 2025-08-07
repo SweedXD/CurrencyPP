@@ -30,10 +30,10 @@ class ExchangeRates():
     _aliases = {}
 
     in_cur_fallback = 'USD'
-    out_cur_fallback = 'EUR GBP'
+    out_cur_fallback = 'USD EUR JPY'
 
     default_cur_in = 'USD'
-    default_curs_out = ['EUR', 'GBP']
+    default_curs_out = ['USD', 'EUR', 'JPY']  # <-- Edit this list as needed
 
     error = None
 

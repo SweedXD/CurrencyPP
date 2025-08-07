@@ -1,60 +1,47 @@
 body:
+  - type: input
+    attributes:
+      name: input_cur
+      label: "Default input currency:"
+      defaultValue: "USD"
+      description: "Default source currency (ISO 4217)"
+  - type: input
+    attributes:
+      name: output_cur
+      label: "Default output currency:"
+      defaultValue: "USD EUR JPY"
+      description: "Default output currency (ISO 4217; whitespace-separated)"
+  - type: input
+    attributes:
+      name: app_id
+      label: "OpenExchangeRates App ID:"
+      defaultValue: ""
+      description: "OpenExchangeRates App ID (used if cache fails)"
   - type: dropdown
     attributes:
       name: update_freq
-      label: Update Frequency
-      description: The frequency at which rates are automatically updated
-      defaultValue: daily
+      label: "Update Frequency:"
+      defaultValue: "daily"
       options:
         - never
         - hourly
         - daily
-  - type: input
-    attributes:
-      name: input_cur
-      label: Default input currency
-      description: The ISO 4217 code of the default source currency to assume if none is specified at search time
-      defaultValue: 'USD'
-  - type: input
-    attributes:
-      name: output_cur
-      label: Default output currency
-      description: The ISO 4217 code of the default output currency to assume if none is specified at search time. Separate each currency code by any whitespace
-      defaultValue: 'EUR GBP'
+      description: "Update frequency (auto-refresh rates)"
   - type: input
     attributes:
       name: separators
-      label: Separator
-      description: The valid separators between sources and destination. Separate values with whitespace
-      defaultValue: 'to in :'
+      label: "Separator:"
+      defaultValue: "to in : ."
+      description: "Source⇄destination separators (whitespace-separated)"
   - type: input
     attributes:
       name: destination_separators
-      label: Destination Separator
-      description: The valid separators between multiple destination currencies. Separate values with whitespace
-      defaultValue: 'and & ,'
-  - type: input
-    attributes:
-      name: app_id
-      label: OpenExchangeRates App ID
-      description: >
-        A custom OpenExchangeRates App ID to use whenever the cache layer fails.
-        If this is not specified, the plugin will only use the cache layer, which has
-        no guarantees to work. The free layer should be sufficient for most users.
-      defaultValue: ''
+      label: "Destination Separator:"
+      defaultValue: "and & ,"
+      description: "Destination currency separators (whitespace-separated)"
   - type: textarea
     attributes:
       name: aliases
-      label: Aliases
-      description: >
-        Aliases are alternative names for currencies, allowing you to enter simpler
-        names instead of having to memorize currency codes
-        
-        For instance, you can write the local name (both singular and plural) for your
-        most used currencies. You can also use '$' to represent your local currency
-
-        Aliases are case-insensitive, can be any length and can be composed of any
-        character except numbers. Separate aliases with whitespace and newline
-      defaultValue: |
-        EUR = euro euros
-        usd = dollar dollars $ bucks
+      label: "Aliases:"
+      defaultValue: "USD = $ dollar dollars bucks\nEUR = euro euros"
+      description: "Currency aliases (whitespace-separated)"
