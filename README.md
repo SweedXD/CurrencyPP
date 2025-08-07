@@ -1,3 +1,4 @@
+# CurrencyPP (UI Fixed)
 This is a community-maintained fork of the original [CurrencyPP](https://github.com/LeLocTai/Flow.Launcher.Plugin.CurrencyPP) plugin by **[LeLocTai](https://github.com/LeLocTai)**. The primary purpose of this fork is to provide a usable version for users affected by the broken settings UI bug.
 
 <img width="826" height="711" alt="image" src="https://github.com/user-attachments/assets/6164e8f2-a8f6-4bd6-a1ff-b02ad94cbc91" />
