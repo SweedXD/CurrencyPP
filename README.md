@@ -1,123 +1,75 @@
-# Flow.Launcher.Plugin.CurrencyPP
+This is a community-maintained fork of the original [CurrencyPP](https://github.com/LeLocTai/Flow.Launcher.Plugin.CurrencyPP) plugin by **[LeLocTai](https://github.com/LeLocTai)**. The primary purpose of this fork is to provide a usable version for users affected by the broken settings UI bug.
 
-![demo](./demo.png)
-![settings](./settings.png)
+<img width="826" height="711" alt="image" src="https://github.com/user-attachments/assets/6164e8f2-a8f6-4bd6-a1ff-b02ad94cbc91" />
 
-A port of [Keypirinha Currency plugin](https://github.com/AvatarHurden/keypirinha-currency) to Flow launcher.
+## ✨ What's New in This Fork
 
-Compared to the existing [Currency Converter](https://github.com/deefrawley/Flow.Launcher.Plugin.Currency) plugin:
- - Support [more currencies](https://docs.openexchangerates.org/reference/supported-currencies)
- - Output multiple currencies
- - Allow setting default currencies to convert from/to
- - Customizable aliases. For example, 1$ can be configured to be USD or AUD
- - Support math (see below)
+This version addresses the most critical bug preventing users from configuring the plugin.
 
-Below is an excerpt the original readme
+*   ✅ **Fixed Broken Settings UI:** The main achievement of this fork is a completely repaired settings page. All configuration options (API Key, default currencies, aliases, etc.) are now fully visible and editable within the Flow Launcher settings window.
+> 🔄 **Restart Required:** Right-click the Flow Launcher tray icon, choose **Exit**, and reopen the app for changes to take effect.
+
+## 🚀 Installation
+### 📦 Install from Flow Launcher Plugin Store
+
+1. Launch Flow Launcher (`Alt + Space`)
+2. Type `pm install` and search for CurrencyPP (UI Fixed) and hit **Enter**
+
+That’s it — the plugin will be installed and ready to use instantly 🎉
 
 ---
 
-## Usage
+### 🛠 Manual Installation
 
-For the most basic usage, simply enter the amount to convert, the source currency and the destination currency, such as `5 USD in EUR`.
-You can perform mathematical operations for the source amount, such as `10*(2+1) usd in EUR`, and you can even perform some math on the resulting amount `5 usd in EUR / 2`.
+1.  Go to the [**Releases**](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY/releases) page of this repository.
+2.  Download the latest `.zip` file.
+3.  Unzip the contents into your Flow Launcher's plugins directory (`%APPDATA%\FlowLauncher\Settings\Plugins`).
+4.  Restart Flow Launcher.
 
-Furthermore, you can add (or subtract) multiple currencies together, such as `5 USD + 2 GBP in EUR`.
-You can also convert into multiple destination currencies, such as `5 USD in EUR, GBP`, and each conversion will be displayed as a separate result.
+## 💡 Usage
 
-If you omit the name of a currency, such as in `5 USD` or `5 in USD`, the plugin will use the default currencies specified in the configuration file.
-You can also change what words and symbols are used between multiple destination currencies and between the source and destination.
+The core currency conversion functionality remains the same.
 
-### Aliases
+| Query Type                         | Example                                                                | Description                                                                  |
+| ---------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Simple Conversion**              | `5 . EUR`                                                              | Converts 5 of your default input currency to your default output currencies. |
+| **Specific Amount & Currency**     | `100 usd`                                                              | Converts 100 US Dollars to your default output currencies.                   |
+| **Specify Source and Destination** | `50 eur usd`<br>`100 gbp . jpy`<br>`100 gbp : jpy`<br>`100 gbp to jpy` | Converts 100 British Pounds to Japanese Yen.                                 |
+| **Specify Multiple Destinations**  | `50 eur usd , cad`<br>`50 eur usd & cad`<br>`50 eur usd and cad`       | Converts 50 Euros to both US Dollars and Canadian Dollars.                   |
+| **Using Aliases/Symbols**          | `EUR = euro euros €`                                                   | Use common symbols or custom-defined aliases for currencies.                 |
 
-By default, the plugin operates only on [ISO currency codes](https://pt.wikipedia.org/wiki/ISO_4217) (and a few others).
-However, there is support for *aliases*, which are alternative names for currencies.
-In the configuration file, the user can specify as many aliases as they desire for any currency (for instance, `dollar` and `dollars` for USD).
-Aliases, just like regular currency codes, are case-insensitive (i.e. `EuR`, `EUR` and `eur` are all treated the same).
-
-
+- 💡 **Tip:** You can configure the **`$` alias** (or any other) to match any currency you want—making conversions quicker and more intuitive.
 ### Math
 
-The available mathematical operations are addition (`+`), subtraction (`-`), multiplication (`*`), division (`/`) and exponentiation (`**` or `^`).
-You can also use parentheses and the negative operator (`-(3 + 4) * 4`, for example).
-
-### Grammar
-
-For those familiar with BNF grammars and regex, below is grammar accepted by the parser (`prog` is the top-level expression):
-
-```
-prog := sources (to_key? destinations)? extra?
-
-to_key := 'to' | 'in' | ':'
-
-destinations := cur_code sep destinations | cur_code
-
-sep := ',' | '&' | 'and'
-cur_code := ([^0-9\s+-/*^()]+)
-  # excluding any words that are used as 'sep' or 'to_key'
-
-extra := ('+' | '-' | '*' | '/' | '**' | '^' ) expr
-
-sources := source ('+' | '-') sources | source
-source := '(' source ')'
-      | cur_code expr
-      | expr (cur_code?)
-
-expr := add_expr
-add_expr := mult_expr | add_expr ('+' | '-') mult_expr
-mult_expr := exp_expr | mult_expr ('*' | '/') exp_expr
-exp_expr := unary_expr | exp_expr ('^' | '**') unary_expr
-unary_expr := operand | ('-' | '+') unary_expr
-operand := number | '(' expr ')'
-
-number := (0|[1-9][0-9]*)([.,][0-9]+)?([eE][+-]?[0-9]+)?
-```
-
-## Backend
-
-The Currency plugin uses [OpenExchangeRates](https://openexchangerates.org/) to obtain hourly exchange rates for all currencies. Since this project does not make any money, it is using the free tier, which only allows 1000 requests per month. In order to allow the most number of people to use the plugin without any work, there is a cache layer that reduces the number of requests to the backend. 
-
-If this cache layer fails, however, the plugin quickly runs into this request limit. In order to work around this issue, the plugin allows users to specify their own App ID to use whenever the cache is older than 2 hours. This shouldn't happen often, but is a safeguard in case things go wrong. Users can get a free App ID by creating an account [here](https://openexchangerates.org/signup/free).
-
-## Change Log
-
-### v2.2
-* Added workaround for situations in which the cache fails.
-
-### v2.1
-
-* Improved grammar for more intuitive use
-* Bug fixes
-* Improved options to copy results to clipboard
-
-### v2.0
-
-* Improved parser. More flexible, and now you can specify your own separators in the config file
-* Math! Add, subtract, multiply, or divide numbers to obtain the source amount for a currency (also supports parentheses and exponents)
-* Multiple source currencies. Add or subtract amounts in different currencies to obtain a final result
-* An icon
-* Support for aliases. The user can create aliases ('nicknames') for any valid currency in the config file
+| **Functionality**           | **Example**            | **Description**                                                 |
+| --------------------------- | ---------------------- | --------------------------------------------------------------- |
+| **Simple arithmetic**       | `10 + 5 USD in EUR`    | Adds a number to the source amount before converting.           |
+| **Grouped math on input**   | `10*(2+1) USD in EUR`  | Uses math expressions (with parentheses) on the source amount.  |
+| **Math on result**          | `5 USD in EUR / 2`     | Converts first, then divides the resulting amount.              |
+| **Multi-currency addition** | `5 USD + 2 GBP in EUR` | Adds values from different currencies, then converts the total. |
 
 
-### v1.4
+## ⚙️ Configuration
 
-* Added a layer between clients and OpenExchangeRates to mitigate API usage
+You can configure the plugin from the Flow Launcher settings window. **Remember to restart Flow Launcher after making changes.**
 
-### v1.3
+| Setting                       | Description                                                                                                                                                          |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Update Frequency**          | How often the plugin should fetch new rates. "Daily" is recommended for most users.                                                                                  |
+| **Default input currency**    | The currency code (e.g., `USD`) to use when you use Simple Conversion, etc.                                                                                          |
+| **Default output currencies** | A space-separated list of currency codes (e.g., `USD EUR JPY`) to show as results when no destination currency is specified in the query.                            |
+| **OpenExchangeRates App ID**  | App ID for OpenExchangeRates, used if the cache fails. (untested)                                                                                                    |
+| **Separator**                 | Source-to-destination separators (whitespace-separated). Examples include `to`, `in`, `:` and `.`                                                                    |
+| **Destination Separator**     | Separators used between multiple destination currencies (whitespace-separated). Examples include `and`, `&`, and `,`                                                 |
+| **Aliases**                   | Define custom aliases for currencies, one per line. Use the format `CODE = symbol` (space-separated). **Example:** `USD = $ dollar dollars bucks` `EUR = euro euros` |
 
-* Changed API from Yahoo Finance to OpenExchangeRates
+## 📚 Additional Features (from Original Plugin)
 
-### v1.2
+The original Currency++ plugin includes advanced functionality for math operations, grammar-based queries, and backend integrations.
 
-* Saves exchange information locally, updating automatically or manually
-* Allow converting currencies directly in the search
+**Please Note:** The focus of this fork was solely on fixing the settings UI. These advanced features have **not been tested** in this version. For detailed documentation on how to use them, please refer to the [**Original Repository's Documentation**](https://github.com/LeLocTai/Flow.Launcher.Plugin.CurrencyPP).
 
-### v1.1
+## 👨‍💼 Credits
 
-* Allow decimal amounts to be inserted (using either a comma or a period)
-* Added copy actions
-* Added configuration for default currencies
-* Multiple source and destination currencies can be specified
-
-### v1.0
-
-* Initial Release
+*   Original updated plugin created by **@LeLocTai**.
+*   This updated version was created by **@SweedXD**.
