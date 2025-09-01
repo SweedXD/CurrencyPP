@@ -161,7 +161,7 @@ class ExchangeRates():
             return None
         elif validated in self._aliases:
             return None
-        elif re.search('\d', validated):
+        elif re.search(r'\d', validated):
             return None
         else:
             return validated
