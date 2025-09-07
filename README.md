@@ -14,7 +14,7 @@ This version addresses the most critical bug preventing users from configuring t
 ### 📦 Install from Flow Launcher Plugin Store
 
 1. Launch Flow Launcher (`Alt + Space`)
-2. Type `pm install CurrencyPP by SweedXD` and search for CurrencyPP (UI Fixed) and hit **Enter**
+2. Type `pm install CurrencyPP by SweedXD` and hit **Enter**
 
 That’s it — the plugin will be installed and ready to use instantly 🎉
 
