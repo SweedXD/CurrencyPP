@@ -3,11 +3,107 @@ from flox.utils import cache_path
 from parsy import ParseError
 from currencyparser import make_parser, ParserProperties
 from flox import Flox, clipboard
+from functools import cached_property
 
 
 class CurrencyPP(Flox):
 
     broker = None
+
+    @cached_property
+    def manifest(self):
+        import os
+        import json
+        with open(os.path.join(self.plugindir, 'plugin.json'), 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    @property
+    def app_settings(self):
+        import os
+        import json
+        with open(os.path.join(self.appdata, 'Settings', 'Settings.json'), 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    @cached_property
+    def logger(self):
+        import logging
+        import logging.handlers
+        logger = logging.getLogger('')
+        formatter = logging.Formatter(
+            '%(asctime)s %(levelname)s (%(filename)s): %(message)s',
+            datefmt='%H:%M:%S')
+        logfile = logging.handlers.RotatingFileHandler(
+                self.logfile,
+                maxBytes=1024 * 2024,
+                backupCount=1,
+                encoding='utf-8')
+        logfile.setFormatter(formatter)
+        if not logger.handlers:
+            logger.addHandler(logfile)
+        logger.setLevel(logging.WARNING)
+        return logger
+
+    def run(self, debug=None):
+        import json
+        import sys
+        import time
+        if debug:
+            self._debug = debug
+        self.rpc_request = {'method': 'query', 'parameters': ['']}
+        if len(sys.argv) > 1:
+            try:
+                self.rpc_request = json.loads(sys.argv[1])
+            except Exception as e:
+                self.logger.error(f"Failed to parse RPC request: {e}")
+        
+        # Sync settings from RPC request
+        if 'settings' in self.rpc_request.keys():
+            self._settings = self.rpc_request['settings']
+            self.logger.debug('Loaded settings from RPC request')
+            if hasattr(self, 'settings') and self._settings:
+                try:
+                    old_save = self.settings._save
+                    self.settings._save = False
+                    self.settings.update(self._settings)
+                    self.settings._save = old_save
+                except Exception as e:
+                    self.logger.error(f"Failed to update self.settings with RPC settings: {e}")
+            # Rerun _read_config to apply updated settings before query
+            try:
+                self._read_config()
+            except Exception as e:
+                self.logger.error(f"Failed to run _read_config: {e}")
+                
+        if not self._debug:
+            self._debug = self.settings.get('debug', False)
+        if self._debug:
+            self.logger_level("debug")
+            
+        self.logger.debug(f'Request:\n{json.dumps(self.rpc_request, indent=4)}')
+        self.logger.debug(f"Params: {self.rpc_request.get('parameters')}")
+        
+        request_method_name = self.rpc_request.get("method")
+        if request_method_name == 'query' or request_method_name == 'context_menu':
+            request_method_name = f"_{request_method_name}"
+
+        request_parameters = self.rpc_request.get("parameters")
+        request_method = getattr(self, request_method_name)
+        try:
+            results = request_method(*request_parameters) or self._results
+        except Exception as e:
+            self.logger.exception(e)
+            results = self.exception(e) or self._results
+            
+        line_break = '#' * 10
+        ms = int((time.time() - self._start) * 1000)
+        self.logger.debug(f'{line_break} Total time: {ms}ms {line_break}')
+        
+        if request_method_name == "_query" or request_method_name == "_context_menu":
+            results = {"result": results}
+            if self.settings != self._settings and self._settings is not None:
+                results['SettingsChange'] = self.settings
+
+            print(json.dumps(results))
 
     def __init__(self):
         """Initialize the CurrencyPP plugin."""

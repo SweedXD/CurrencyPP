@@ -111,7 +111,7 @@ class ExchangeRates():
         return False
 
     def load_from_file(self):
-        with open(self._file_path) as f:
+        with open(self._file_path, encoding='utf-8') as f:
             data = json.load(f)
 
         self.last_update = datetime.strptime(
@@ -128,7 +128,7 @@ class ExchangeRates():
             'last_update': self.last_update.strftime('%Y-%m-%dT%H:%M:%S')
         }
 
-        with open(self._file_path, 'w') as f:
+        with open(self._file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f)
 
     def rate(self, code):
