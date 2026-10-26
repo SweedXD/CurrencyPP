@@ -4,13 +4,13 @@ body:
       name: input_cur
       label: "Default input currency:"
       defaultValue: "USD"
-      description: "Default source currency (ISO 4217)"
+      description: "Default source currency. An ISO 4217 code (USD, EUR, TRY) or one of your own aliases."
   - type: input
     attributes:
       name: output_cur
       label: "Default output currency:"
       defaultValue: "USD EUR JPY"
-      description: "Default output currency (ISO 4217; whitespace-separated)"
+      description: "Default output currencies, separated by spaces or commas. Codes and your own aliases both work."
   - type: input
     attributes:
       name: app_id
@@ -44,4 +44,4 @@ body:
       name: aliases
       label: "Aliases:"
       defaultValue: "USD = $ dollar dollars bucks\nEUR = euro euros"
-      description: "Currency aliases (whitespace-separated)"
+      description: "One 'CODE = alias alias ...' per line, separated by spaces or commas. Symbols work too, e.g. 'TRY = ₺ lira tl' or 'RUB = ₽ ruble'."
