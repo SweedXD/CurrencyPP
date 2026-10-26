@@ -205,7 +205,11 @@ def make_parser(properties):
             op = extras['operation']
             value = extras['value']
             for s in source:
-                s['amount'] = op(s['amount'], value)
+                # A bare currency code carries no amount ('usd*2'), so it means
+                # one unit - the same default convert() applies. Without this the
+                # operator hit None and raised TypeError.
+                amount = s['amount'] if s['amount'] is not None else 1
+                s['amount'] = op(amount, value)
         return {
             'sources': source,
             'destinations': destination

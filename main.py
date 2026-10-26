@@ -8,4 +8,6 @@ sys.path.append(os.path.join(parent_folder_path, 'src'))
 from currencypp import CurrencyPP
 
 if __name__ == "__main__":
-    CurrencyPP()
+    plugin = CurrencyPP()
+    CurrencyPP.__del__ = lambda self: None
+    plugin.run()

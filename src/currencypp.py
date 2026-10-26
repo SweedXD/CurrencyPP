@@ -1,3 +1,11 @@
+import json
+import locale
+import logging
+import logging.handlers
+import re
+
+from functools import cached_property
+
 from exchange import ExchangeRates, UpdateFreq, CurrencyError
 from flox.utils import cache_path
 from parsy import ParseError
@@ -5,51 +13,177 @@ from currencyparser import make_parser, ParserProperties
 from flox import Flox, clipboard
 
 
+DEFAULT_INPUT_CUR = 'USD'
+DEFAULT_OUTPUT_CUR = 'USD EUR JPY'
+DEFAULT_SEPARATORS = 'to in : .'
+DEFAULT_DEST_SEPARATORS = 'and & ,'
+DEFAULT_ALIASES = 'USD = $ dollar dollars bucks\nEUR = euro euros'
+DEFAULT_UPDATE_FREQ = 'daily'
+
+
 class CurrencyPP(Flox):
 
-    broker = None
-
     def __init__(self):
-        """Initialize the CurrencyPP plugin."""
+        """Set up cheap state only.
+
+        Configuration deliberately does not happen here: flox fills
+        `self._settings` while parsing argv inside Launcher.run(), which runs
+        after __init__, so anything reading settings this early would only ever
+        see the file on disk. See _ensure_config().
+        """
         super().__init__()
         self.logger_level("debug")
-        self.logger.debug("=== CurrencyPP Plugin Initializing ===")
+        self.broker = None
+        self.parser = None
+        self.config_warnings = []
+        self._disk_settings = None
+        self._configured = False
+
+    @cached_property
+    def logger(self):
+        """The same rotating plugin.log as flox, but written as UTF-8.
+
+        flox opens it with the process default encoding (flox/__init__.py:275),
+        which is the ANSI codepage on Windows. Any message containing '₺' - or a
+        localized alias, or a currency name - then raises inside logging, gets
+        dropped, and leaks a traceback onto stderr. Those are exactly the lines a
+        non-English user needs in order to see why a setting was rejected.
+        """
+        logger = logging.getLogger('CurrencyPP')
+        logger.propagate = False
+        if not logger.handlers:
+            handler = logging.handlers.RotatingFileHandler(
+                self.logfile, maxBytes=1024 * 2024, backupCount=1, encoding='utf-8')
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s %(levelname)s (%(filename)s): %(message)s',
+                datefmt='%H:%M:%S'))
+            logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+        return logger
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+
+    @property
+    def settings(self):
+        """Prefer the settings Flow sent with this request over the file on disk.
+
+        flox 0.18.1 always re-reads Settings.json (flox/__init__.py:318) and then
+        hands it back to Flow as an authoritative `SettingsChange` on every query:
+        flox/launcher.py:53 guards that with `self.rpc_request.get('Settings')`
+        while the request actually carries the key `settings`, so the guard never
+        holds. Because this plugin uses ActionKeyword '*' it runs on every
+        keystroke, and a disk snapshot that is merely a moment out of date gets
+        pushed back over what the user is typing in the settings window - which is
+        what made input/output currencies and aliases appear to reset themselves.
+
+        Returning what Flow just sent makes that echo a no-op, and when Flow sends
+        nothing the second half of the guard short-circuits so no SettingsChange
+        is emitted at all.
+        """
+        if self._settings is not None:
+            return self._settings
+        if self._disk_settings is None:
+            self._disk_settings = self._settings_from_disk()
+        return self._disk_settings
+
+    def _settings_from_disk(self):
+        """Read Settings.json ourselves, as UTF-8, and never write it back.
+
+        flox opens the file with the process default encoding, which is the ANSI
+        codepage on Windows: a '₺' stored as UTF-8 either turns into mojibake or
+        raises UnicodeDecodeError, which flox does not catch (it only handles
+        JSONDecodeError). Its Settings class also writes an empty '{}' over a
+        missing file.
+        """
+        try:
+            path = self.settings_path
+        except Exception as e:
+            self.logger.error("Could not resolve the settings path: {}".format(e))
+            return {}
+
+        encodings = ['utf-8-sig']
+        preferred = locale.getpreferredencoding(False)
+        if preferred and preferred.lower() not in ('utf-8', 'utf8'):
+            encodings.append(preferred)
+
+        for encoding in encodings:
+            try:
+                with open(path, 'r', encoding=encoding) as f:
+                    data = json.load(f)
+            except FileNotFoundError:
+                return {}
+            except UnicodeDecodeError:
+                self.logger.warning(
+                    "{} is not valid {}, trying the next encoding".format(path, encoding))
+                continue
+            except (json.JSONDecodeError, OSError) as e:
+                self.logger.error("Could not read settings from {}: {}".format(path, e))
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        self.logger.error("Could not decode {} with any known encoding".format(path))
+        return {}
+
+    def _ensure_config(self, force=False):
+        """Build the broker and parser once per process, on first use."""
+        if self._configured and not force:
+            return
+        if force:
+            self._disk_settings = None
+        self._configured = True
         self._read_config()
+
+    def reload_settings(self):
+        """Called by Flow when the user changes settings."""
+        self._ensure_config(force=True)
+
+    # ------------------------------------------------------------------
+    # Query handling
+    # ------------------------------------------------------------------
 
     def query(self, user_input):
         """Process a currency conversion query from the user."""
+        self._ensure_config()
+        if self.broker is None or self.parser is None:
+            # Startup failed outright; it is already logged. Stay quiet rather
+            # than putting an error on every unrelated search, since this plugin
+            # sees every query.
+            return
+
         self.logger.debug(f"Processing query: '{user_input}'")
-        
+
         try:
             # Validate query format
             if not self._is_direct_request(self._parse_and_merge_input(user_input, True)):
                 return
-            
+
             # Parse and validate query content
             query = self._parse_and_merge_input(user_input)
             if not query or query.get('destinations') is None or query.get('sources') is None:
                 return
-                
+
             # Update rates if needed
-            if self.broker.tryUpdate():
-                self._update_update_item()
-                
+            self.broker.tryUpdate()
+
             if self.broker.error:
                 self.add_item("Webservice failed", f"{self.broker.error}")
-                return
-                
-            # Perform conversion and show results
-            results = self.broker.convert(query)
-            for result in results:
-                self.add_item(
-                    result['title'],
-                    result['description'],
-                    context=result['description'],
-                    method=self.item_action,
-                    parameters=[result['amount']],
-                    score=100,
-                )
-                
+            elif not self.broker.has_rates:
+                self.add_item("No exchange rates available",
+                              "Click 'Update Currency' below to try again")
+            else:
+                results = self.broker.convert(query)
+                for result in results:
+                    self.add_item(
+                        result['title'],
+                        result['description'],
+                        context=result['description'],
+                        method=self.item_action,
+                        parameters=[result['amount']],
+                        score=100,
+                    )
+
         except CurrencyError as ce:
             self.logger.error(f"Currency error: {ce}")
             return
@@ -57,10 +191,23 @@ class CurrencyPP(Flox):
             self.logger.error("Unexpected error", exc_info=True)
             self.add_item("Error", f"An error occurred: {str(e)}")
 
-        # Always show the update status
+        # Tell the user about settings we could not apply, instead of letting
+        # them look like the settings reset themselves.
+        for warning in self.config_warnings:
+            self.add_item(
+                'Check the CurrencyPP settings',
+                warning,
+                score=90,
+                dont_hide=True,
+            )
+
+        if self.broker.last_update:
+            update_subtitle = 'Last updated at ' + self.broker.last_update.isoformat()
+        else:
+            update_subtitle = 'Exchange rates have never been loaded'
         self.add_item(
             'Update Currency',
-            'Last updated at ' + self.broker.last_update.isoformat(),
+            update_subtitle,
             method=self.update_rates,
             parameters=[user_input],
             dont_hide=True
@@ -70,44 +217,10 @@ class CurrencyPP(Flox):
         clipboard.put(str(amount))
 
     def update_rates(self, last_query):
-        self.broker.update()
+        self._ensure_config()
+        if self.broker:
+            self.broker.update()
         self.change_query(str(last_query), True)
-
-    def reload_settings(self):
-        """Handle plugin settings changes from the Flow Launcher UI."""
-        try:
-            if self.broker:
-                # Save current state for change detection
-                old_state = {
-                    'input': getattr(self.broker, 'default_cur_in', None),
-                    'output': getattr(self.broker, 'default_curs_out', None)
-                }
-            
-            # Reload and apply new settings
-            self.settings.reload()
-            self._read_config()
-            
-            # Check for and handle currency changes
-            if self.broker:
-                if old_state['input'] != self.broker.default_cur_in:
-                    self.logger.info(f"Input currency updated: {old_state['input']} -> {self.broker.default_cur_in}")
-                if old_state['output'] != self.broker.default_curs_out:
-                    self.logger.info(f"Output currencies updated: {old_state['output']} -> {self.broker.default_curs_out}")
-                
-                # Force rate update if currencies changed
-                if (old_state['input'] != self.broker.default_cur_in or 
-                    old_state['output'] != self.broker.default_curs_out):
-                    self.broker.force_update()
-                    
-        except Exception as e:
-            self.logger.error(f"Settings reload failed: {e}")
-            # Attempt recovery through full reset
-            try:
-                if hasattr(self, 'broker'):
-                    delattr(self, 'broker')
-                self._read_config()
-            except Exception as e2:
-                self.logger.critical(f"Settings recovery failed: {e2}")
 
     def _is_direct_request(self, query):
         """Determine if the query explicitly specifies currencies."""
@@ -119,42 +232,34 @@ class CurrencyPP(Flox):
 
     def _parse_and_merge_input(self, user_input=None, empty=False):
         """Parse user input and merge with default currency configuration.
-        
+
         Args:
             user_input: Raw input string from the user
             empty: If True, creates a query template without values
-            
+
         Returns:
             dict: Parsed query with source and destination currencies
         """
-        try:
-            default_cur_in = self.broker.default_cur_in
-            default_curs_out = self.broker.default_curs_out
-            
-            base_query = {
-                'sources': None if empty else [{'currency': default_cur_in, 'amount': 1.0}],
-                'destinations': None if empty else [{'currency': cur} for cur in default_curs_out],
-                'extra': None
-            }
-        except Exception as e:
-            self.logger.error(f"Error creating base query: {e}")
-            base_query = {
-                'sources': None if empty else [{'currency': 'USD', 'amount': 1.0}],
-                'destinations': None if empty else [{'currency': 'EUR'}],
-                'extra': None
-            }
+        default_cur_in = self.broker.default_cur_in
+        default_curs_out = self.broker.default_curs_out
+
+        base_query = {
+            'sources': None if empty else [{'currency': default_cur_in, 'amount': 1.0}],
+            'destinations': None if empty else [{'currency': cur} for cur in default_curs_out],
+            'extra': None
+        }
 
         if not user_input or not user_input.strip():
             return base_query
 
         user_input = user_input.strip()
-        
+
         # Handle direct number input (e.g., "100")
         try:
             amount = float(user_input)
             return {
-                'sources': [{'currency': self.broker.default_cur_in, 'amount': amount}],
-                'destinations': [{'currency': cur} for cur in self.broker.default_curs_out],
+                'sources': [{'currency': default_cur_in, 'amount': amount}],
+                'destinations': [{'currency': cur} for cur in default_curs_out],
                 'extra': None
             }
         except ValueError:
@@ -163,335 +268,169 @@ class CurrencyPP(Flox):
         # Parse and validate full query
         try:
             parsed = self.parser.parse(user_input)
-            
+
             # Apply default currencies if not specified
             if not parsed.get('destinations'):
-                parsed['destinations'] = [{'currency': cur} for cur in self.broker.default_curs_out]
+                parsed['destinations'] = [{'currency': cur} for cur in default_curs_out]
             if not parsed.get('sources'):
-                parsed['sources'] = [{'currency': self.broker.default_cur_in, 'amount': 1.0}]
-            
+                parsed['sources'] = [{'currency': default_cur_in, 'amount': 1.0}]
+
             return parsed
-            
+
         except ParseError:
             return base_query
 
-    def _read_config(self):
-        """Load configuration from settings.json and initialize the plugin.
-        This method is called during __init__ and by reload_settings() when settings change.
-        Uses defensive programming to prevent crashes from malformed settings.
-        This method is idempotent - it can be safely called multiple times to reload settings.
-        
-        CRITICAL: This method has been refactored to fix a runtime state corruption bug.
-        The bug was caused by re-instantiating the ExchangeRates broker during settings reload,
-        which reset user-configured default currencies back to hardcoded class defaults.
-        The fix ensures the broker instance is created only once and its state is preserved.
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def _warn(self, message):
+        """Record a problem the user needs to see, not just one for the log.
+
+        Every one of these used to be a bare `except: continue`, so a dropped
+        alias or currency left no trace anywhere.
         """
-        def _warn_cur_code(name, fallback):
-            try:
-                fmt = "Invalid {} value in config. Using: {}"
-                self.logger.warning(fmt.format(name, fallback))
-            except:
-                pass  # Prevent logging errors from crashing the plugin
+        self.logger.warning(message)
+        if message not in self.config_warnings:
+            self.config_warnings.append(message)
+
+    def _read_text(self, settings, key, default):
+        value = settings.get(key, default)
+        if not isinstance(value, str) or not value.strip():
+            return default
+        return value.strip()
+
+    def _read_words(self, settings, key, default):
+        """Split a setting on whitespace only.
+
+        Deliberately not comma-tolerant, unlike the currency settings: the
+        destination separators default to 'and & ,', where the comma is itself a
+        token the user configured.
+        """
+        words = self._read_text(settings, key, default).split()
+        return words or default.split()
+
+    def _read_update_freq(self, settings):
+        value = self._read_text(settings, 'update_freq', DEFAULT_UPDATE_FREQ)
+        try:
+            return UpdateFreq(value.lower())
+        except ValueError:
+            self._warn("Unknown update frequency '{}' - using '{}'".format(
+                value, DEFAULT_UPDATE_FREQ))
+            return UpdateFreq(DEFAULT_UPDATE_FREQ)
+
+    def _read_config(self):
+        """Load configuration and build the broker and parser.
+
+        Idempotent: safe to call again to pick up changed settings.
+        """
+        self.config_warnings = []
+        settings = self.settings
+
+        self.update_freq = self._read_update_freq(settings)
+        app_id = self._read_text(settings, 'app_id', '')
 
         try:
-            # Read update frequency with safe fallback
-            update_freq_str = self.settings.get('update_freq', 'daily')
-            if not update_freq_str or not isinstance(update_freq_str, str):
-                update_freq_str = 'daily'
-            self.update_freq = UpdateFreq(update_freq_str)
-        except:
-            self.update_freq = UpdateFreq('daily')
-
-        try:
-            # Read API key with safe fallback
-            app_id_key = self.settings.get('app_id', '')
-            if not isinstance(app_id_key, str):
-                app_id_key = ''
-            app_id_key = app_id_key.strip()
-        except:
-            app_id_key = ''
-
-        # Initialize or update the broker
-        try:
-            # Ensure cache directory exists
             cache_dir = cache_path(self.name)
             cache_dir.mkdir(exist_ok=True)
-            
-            # Track if this is first initialization
-            is_first_init = not hasattr(self, 'broker') or self.broker is None
-            
-            if is_first_init:
-                # First-time initialization only
-                self.broker = ExchangeRates(
-                    cache_dir, self.update_freq, app_id_key, self)
-                self.logger.info("Created new ExchangeRates broker instance")
-            else:
-                # CRITICAL FIX: During settings reload, preserve the existing broker
-                # but ensure all its configuration is fully updated
-                self.logger.info("Updating existing broker instance during settings reload")
-                
-                # 1. Verify we can access the existing broker
-                if not self.broker or not hasattr(self.broker, 'update_freq'):
-                    raise ValueError("Invalid broker state detected")
-                    
-                # 2. Update configuration and track changes
-                changes = []
-                
-                if self.broker.update_freq != self.update_freq:
-                    self.broker.update_freq = self.update_freq
-                    changes.append("update frequency")
-                    
-                if (hasattr(self.broker, 'expensive_service') and 
-                    self.broker.expensive_service and 
-                    self.broker.expensive_service.app_id != app_id_key):
-                    self.broker.expensive_service.app_id = app_id_key
-                    changes.append("API key")
-                
-                # 3. Reset broker state
-                self.broker.clear_aliases()
-                self.broker.error = None
-                
-                # 4. Force immediate update if config changed
-                if changes:
-                    self.logger.info("Config changes detected: " + ", ".join(changes))
-                    self.broker.force_update()
-                    self.logger.info("Forced rate refresh due to config changes")
+            self.broker = ExchangeRates(cache_dir, self.update_freq, app_id, self)
         except Exception as e:
-            self.logger.error("Failed to initialize ExchangeRates broker: {}".format(e))
+            self.logger.error(
+                "Failed to initialize ExchangeRates broker: {}".format(e), exc_info=True)
+            self.broker = None
             return
 
-        # --- Read and set input currency from user settings ---
-        # This section runs for both new brokers and existing brokers during live reload
-        try:
-            # Get input currency from settings
-            current_input = getattr(self.broker, 'default_cur_in', None)
-            self.logger.debug(f"Current input currency before update: {current_input}")
-            
-            input_code = self.settings.get('input_cur', 'USD' if is_first_init else current_input)
-            if not isinstance(input_code, str) or not input_code.strip():
-                input_code = 'USD' if is_first_init else current_input
-            input_code = input_code.strip()
-            
-            self.logger.debug(f"New input currency from settings: {input_code}")
-            
-            if is_first_init:
-                # First run - try to set the currency, fall back to USD if needed
-                success = self.broker.set_default_cur_in(input_code)
-                if not success:
-                    self.logger.warning(f"Failed to set initial input currency: {input_code}")
-                    self.broker.set_default_cur_in('USD')
-            else:
-                # During reload, only update if the setting actually changed
-                if current_input and input_code != current_input:
-                    self.logger.info(f"Updating input currency from '{current_input}' to '{input_code}'")
-                    success = self.broker.set_default_cur_in(input_code)
-                    if not success:
-                        self.logger.warning(f"Failed to update input currency to: {input_code}")
-                        self.logger.info(f"Keeping existing input currency: {current_input}")
-                else:
-                    self.logger.debug("Input currency unchanged, skipping update")
-        except Exception as e:
-            if is_first_init:
-                self.logger.warning("Error setting input currency, using USD: {}".format(e))
-                self.broker.set_default_cur_in('USD')
-            else:
-                self.logger.error("Error updating input currency: {}".format(e))
+        separators = self._read_words(settings, 'separators', DEFAULT_SEPARATORS)
+        dest_separators = self._read_words(
+            settings, 'destination_separators', DEFAULT_DEST_SEPARATORS)
 
-        # --- Handle Output Currencies ---
-        # FINAL RUNTIME STATE CORRUPTION FIX:
-        # The root cause was that this fallback logic would overwrite user settings during runtime
-        # (e.g., when exchange rates are updated and validation temporarily fails).
-        # The fix: Only use fallbacks during first-run bootstrap, preserve user settings at runtime.
-        
-        # 1. Define a single, authoritative default value. This is the only place it needs to be set.
-        DEFAULT_OUTPUT_CUR = 'USD EUR JPY'
-        ULTIMATE_FALLBACK_CUR = 'USD EUR'  # A minimal, safe fallback for bootstrap only
+        # Aliases come first: the default input and output currencies may be
+        # written as aliases ('lira', '₺'), which only resolves once the alias
+        # table is populated. The old order made that impossible.
+        self._apply_aliases(settings)
+        self._apply_input_currency(settings)
+        self._apply_output_currencies(settings)
+
+        properties = ParserProperties()
+        properties.default_cur_in = self.broker.default_cur_in
+        properties.default_curs_out = self.broker.default_curs_out
+        properties.to_keywords = separators
+        properties.sep_keywords = dest_separators
+        properties.aliases = self.broker.aliases
 
         try:
-            # 2. Get the user's setting from settings.json, falling back to our default if it's missing.
-            output_code = self.settings.get('output_cur', DEFAULT_OUTPUT_CUR)
-
-            # 3. Sanitize the value. If it's not a string or is empty after stripping, use the default.
-            if not isinstance(output_code, str) or not output_code.strip():
-                output_code = DEFAULT_OUTPUT_CUR
-            else:
-                output_code = output_code.strip()
-
-            # 4. Handle output currencies differently for first run vs. reload
-            current_currencies = getattr(self.broker, 'default_curs_out', None)
-            self.logger.debug(f"Current output currencies before update: {current_currencies}")
-            self.logger.debug(f"New output currencies from settings: {output_code}")
-            
-            if is_first_init:
-                # On first run, try user setting, then default, then fallback
-                success = self.broker.set_default_curs_out(output_code)
-                if not success:
-                    self.logger.warning(f"Failed to set initial output currencies: {output_code}")
-                    if not self.broker.set_default_curs_out(DEFAULT_OUTPUT_CUR):
-                        self.logger.warning(f"Failed to set default output currencies: {DEFAULT_OUTPUT_CUR}")
-                        self.broker.set_default_curs_out(ULTIMATE_FALLBACK_CUR)
-            else:
-                # During runtime/reload, ONLY update if the setting actually changed
-                if current_currencies is None:
-                    # Something's wrong, broker lost its state
-                    self.logger.error("Broker lost currency state during reload")
-                    success = self.broker.set_default_curs_out(output_code)
-                    if not success:
-                        self.broker.set_default_curs_out(ULTIMATE_FALLBACK_CUR)
-                else:
-                    # Convert current_currencies to space-separated string for comparison
-                    current_str = ' '.join(current_currencies)
-                    if current_str != output_code:
-                        # Only try to update if the setting actually changed
-                        self.logger.info(f"Updating output currencies from '{current_str}' to '{output_code}'")
-                        success = self.broker.set_default_curs_out(output_code)
-                        if success:
-                            self.logger.info("Successfully updated output currencies")
-                        else:
-                            self.logger.warning(f"Failed to update to new output currencies: {output_code}")
-                            self.logger.info(f"Keeping existing currencies: {current_str}")
-                    else:
-                        self.logger.debug("Output currencies unchanged, skipping update")
-
-        except Exception as e:
-            # 6. If any other unexpected error occurs, preserve existing settings during runtime
-            existing_currencies = getattr(self.broker, 'default_curs_out', None)
-            if not existing_currencies or existing_currencies == ['USD', 'EUR', 'JPY']:
-                # First-run bootstrap: use safe fallback
-                self.logger.error("Error processing output currencies during bootstrap: {}. "
-                                  "Using safe default '{}'.".format(e, ULTIMATE_FALLBACK_CUR))
-                self.broker.set_default_curs_out(ULTIMATE_FALLBACK_CUR)
-            else:
-                # Runtime: preserve existing user settings
-                self.logger.error("Error processing output currencies during runtime: {}. "
-                                  "Preserving existing settings: {}.".format(e, existing_currencies))
-
-        # Read separators from settings with safe fallbacks
-        try:
-            separators_string = self.settings.get('separators', 'to in :')
-            if not isinstance(separators_string, str):
-                separators_string = 'to in :'
-            separators_string = separators_string.strip()
-            separators = separators_string.split() if separators_string else ['to', 'in', ':']
-            if not separators:
-                separators = ['to', 'in', ':']
-        except:
-            separators = ['to', 'in', ':']
-
-        # Read destination separators from settings with safe fallbacks
-        try:
-            dest_seps_string = self.settings.get('destination_separators', 'and & ,')
-            if not isinstance(dest_seps_string, str):
-                dest_seps_string = 'and & ,'
-            dest_seps_string = dest_seps_string.strip()
-            dest_separators = dest_seps_string.split() if dest_seps_string else ['and', '&', ',']
-            if not dest_separators:
-                dest_separators = ['and', '&', ',']
-        except:
-            dest_separators = ['and', '&', ',']
-
-        # Read and process aliases from settings with comprehensive error handling
-        # Clear all existing aliases to ensure clean state on reload
-        try:
-            self.broker.clear_aliases()  # This ensures idempotent behavior
-            aliases_string = self.settings.get('aliases', 'EUR = euro euros\nusd = dollar dollars $ bucks')
-            
-            if aliases_string and isinstance(aliases_string, str):
-                for line in aliases_string.splitlines():
-                    try:
-                        line = line.strip()
-                        if not line or '=' not in line:
-                            continue
-                        
-                        parts = line.split('=', 1)
-                        if len(parts) != 2:
-                            continue
-                            
-                        key = parts[0].strip()
-                        aliases_part = parts[1].strip()
-                        
-                        if not key or not aliases_part:
-                            continue
-
-                        # Validate the currency key
-                        try:
-                            validated_key = self.broker.validate_code(key)
-                            if validated_key:
-                                aliases = aliases_part.split()
-                                for alias in aliases:
-                                    if alias:  # Skip empty aliases
-                                        try:
-                                            validated_alias = self.broker.validate_alias(alias)
-                                            if validated_alias:
-                                                self.broker.add_alias(validated_alias, validated_key)
-                                        except:
-                                            continue  # Skip invalid aliases silently
-                        except:
-                            continue  # Skip invalid currency keys silently
-                    except Exception:
-                        continue  # Skip malformed lines silently
-        except Exception as e:
-            self.logger.warning("Error processing aliases: {}".format(e))
-
-        # CRITICAL: Parser initialization must ALWAYS succeed for plugin to work
-        # If it fails, we keep retrying with increasingly minimal configurations
-        parser_initialized = False
-        
-        # Attempt 1: Full configuration
-        try:
-            properties = ParserProperties()
-            properties.default_cur_in = getattr(self.broker, 'default_cur_in', 'USD')
-            properties.default_curs_out = getattr(self.broker, 'default_curs_out', ['USD', 'EUR'])
-            properties.to_keywords = separators
-            properties.sep_keywords = dest_separators
-            properties.aliases = getattr(self.broker, 'aliases', {})
-            
             self.parser = make_parser(properties)
-            parser_initialized = True
-            self.logger.info("Parser initialized successfully with full configuration")
-            
         except Exception as e:
-            self.logger.error("Full parser initialization failed: {}".format(e))
-            
-            # Attempt 2: Minimal configuration with current currencies
+            self.logger.error(
+                "Parser setup failed with the configured separators, "
+                "falling back to the defaults: {}".format(e), exc_info=True)
+            self._warn("Could not use the configured separators - using the defaults")
+            self.parser = make_parser(ParserProperties())
+
+        self.logger.info("Configured input currency: {}".format(self.broker.default_cur_in))
+        self.logger.info("Configured output currencies: {}".format(self.broker.default_curs_out))
+        self.logger.info("Configured {} aliases".format(len(self.broker.aliases)))
+
+    def _apply_aliases(self, settings):
+        """Register the 'CODE = alias alias ...' lines, reporting each rejection."""
+        self.broker.clear_aliases()
+        raw = settings.get('aliases', DEFAULT_ALIASES)
+        if not isinstance(raw, str):
+            self._warn("The aliases setting is not text - ignoring it")
+            return
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' not in line:
+                self._warn("Alias line '{}' has no '=' - expected 'TRY = {} lira tl'".format(
+                    line, '₺'))
+                continue
+
+            key, _, aliases_part = line.partition('=')
+            key = key.strip()
+            aliases_part = aliases_part.strip()
+            if not key or not aliases_part:
+                self._warn("Alias line '{}' is incomplete".format(line))
+                continue
+
             try:
-                minimal_props = ParserProperties()
-                minimal_props.default_cur_in = getattr(self.broker, 'default_cur_in', 'USD')
-                minimal_props.default_curs_out = getattr(self.broker, 'default_curs_out', ['USD', 'EUR'])
-                
-                self.parser = make_parser(minimal_props)
-                parser_initialized = True
-                self.logger.warning("Parser initialized with minimal configuration (currencies only)")
-                
-            except Exception as e2:
-                self.logger.error("Minimal parser initialization failed: {}".format(e2))
-                
-                # Final Attempt: Absolute minimal fallback
-                try:
-                    ultimate_props = ParserProperties()
-                    self.parser = make_parser(ultimate_props)
-                    parser_initialized = True
-                    self.logger.warning("Parser initialized with ultimate fallback configuration")
-                    
-                except Exception as e3:
-                    self.logger.critical("All parser initialization attempts failed")
-                    self.parser = None
-        
-        if not parser_initialized:
-            self.logger.critical("Parser initialization completely failed - plugin may not function correctly")
-            # Even here, we don't return - let the plugin try to continue
-        
-        # Log the final configuration for debugging (with safe string formatting)
-        try:
-            input_cur = getattr(self.broker, 'default_cur_in', 'USD')
-            output_curs = getattr(self.broker, 'default_curs_out', ['USD'])
-            alias_count = len(getattr(self.broker, 'aliases', {}))
-            self.logger.info("Plugin configured with input currency: {}".format(input_cur))
-            self.logger.info("Plugin configured with output currencies: {}".format(output_curs))
-            self.logger.info("Plugin configured with {} aliases".format(alias_count))
-        except:
-            self.logger.info("Plugin configuration completed")
+                currency = self.broker.validate_code(key)
+            except CurrencyError:
+                self._warn("Unknown currency '{}' - that alias line is ignored".format(key))
+                continue
 
+            # Commas and semicolons are tolerated here: 'TRY = ₺, lira, tl' is a
+            # natural way to write this and used to produce aliases literally
+            # named '₺,' that could never match.
+            for token in re.split(r'[\s,;]+', aliases_part):
+                if not token:
+                    continue
+                alias, reason = self.broker.validate_alias(token)
+                if alias is None:
+                    self._warn("Alias '{}' for {} was skipped because {}".format(
+                        token, currency, reason))
+                    continue
+                self.broker.add_alias(alias, currency)
 
-if __name__ == "__main__":
-    CurrencyPP()
+    def _apply_input_currency(self, settings):
+        code = self._read_text(settings, 'input_cur', DEFAULT_INPUT_CUR)
+        if self.broker.set_default_cur_in(code):
+            return
+        self._warn("Unknown input currency '{}' - using {} instead".format(
+            code, DEFAULT_INPUT_CUR))
+        self.broker.set_default_cur_in(DEFAULT_INPUT_CUR)
+
+    def _apply_output_currencies(self, settings):
+        raw = self._read_text(settings, 'output_cur', DEFAULT_OUTPUT_CUR)
+        accepted, rejected = self.broker.set_default_curs_out(raw)
+
+        if rejected:
+            self._warn("Unknown output {}: {} - the rest are still used".format(
+                'currencies' if len(rejected) > 1 else 'currency', ', '.join(rejected)))
+        if not accepted:
+            self._warn("No usable output currency in '{}' - using {} instead".format(
+                raw, DEFAULT_OUTPUT_CUR))
+            self.broker.set_default_curs_out(DEFAULT_OUTPUT_CUR)
+

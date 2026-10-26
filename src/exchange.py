@@ -5,6 +5,25 @@ from webservice import OpenExchangeRates, PrivateDomain
 import json
 import os
 import re
+import unicodedata
+
+
+def normalize_code(value):
+    """Normalize a currency code or alias so storage and lookup always agree.
+
+    Compatibility decomposition folds forms like the full-width '＄' onto '$'.
+    Dropping the combining marks it exposes is what makes this work outside
+    English: Turkish 'İ' decomposes to 'I' plus a combining dot, so 'LİRA',
+    'LIRA', 'lira' and dotless 'lıra' all become one alias, and 'dólar' matches
+    'dolar'. Symbols such as '₺' and '₽' have no decomposition and pass through
+    untouched. casefold() before upper() keeps pairs like German 'ß'/'SS' and
+    Greek final sigma consistent in both directions, which plain upper() does not.
+    """
+    if value is None:
+        return None
+    text = unicodedata.normalize('NFKD', str(value)).strip()
+    text = ''.join(ch for ch in text if not unicodedata.combining(ch))
+    return unicodedata.normalize('NFKC', text).casefold().upper()
 
 
 class CurrencyError(RuntimeError):
@@ -23,22 +42,20 @@ class UpdateFreq(Enum):
 
 class ExchangeRates():
 
-    _file_path = None
-    last_update = None
-    update_freq = None
-    _currencies = {}
-    _aliases = {}
-
     in_cur_fallback = 'USD'
     out_cur_fallback = 'USD EUR JPY'
 
-    default_cur_in = 'USD'
-    default_curs_out = ['USD', 'EUR', 'JPY']  # <-- Edit this list as needed
-
-    error = None
-
     def __init__(self, path, update_freq, app_id, plugin):
         self.plugin = plugin
+        # These used to be class attributes, so every instance shared the same
+        # mutable dicts and clear_aliases() mutated class state.
+        self._currencies = {}
+        self._aliases = {}
+        self.last_update = None
+        self.error = None
+        self.default_cur_in = self.in_cur_fallback
+        self.default_curs_out = self.out_cur_fallback.split()
+
         self.cheap_service = PrivateDomain(self.plugin)
         self.expensive_service = OpenExchangeRates(self.plugin, app_id)
         self.update_freq = update_freq
@@ -48,11 +65,23 @@ class ExchangeRates():
             try:
                 self.load_from_file()
             except Exception as e:
+                self.plugin.logger.warning(
+                    'Could not read cached rates from {}: {}'.format(self._file_path, e))
                 self.update()
         else:
             self.update()
 
         self.tryUpdate()
+
+    @property
+    def aliases(self):
+        """The configured aliases. Callers read `.aliases` while the data lived
+        in `_aliases`, so every diagnostic used to report zero aliases."""
+        return self._aliases
+
+    @property
+    def has_rates(self):
+        return bool(self._currencies)
 
     def shouldUpdate(self):
         time_diff = datetime.now() - self.last_update
@@ -65,7 +94,7 @@ class ExchangeRates():
 
     def tryUpdate(self):
         if not self.last_update:
-            return True
+            return self.update()
         if self.shouldUpdate():
             return self.update()
         else:
@@ -73,11 +102,11 @@ class ExchangeRates():
 
     def update(self):
         try:
+            age = None
             try:
                 self._currencies, update_time = self.cheap_service.load_from_url()
                 self.last_update = datetime.now()
-                time_diff = self.last_update - \
-                    datetime.fromtimestamp(update_time)
+                age = self.last_update - datetime.fromtimestamp(update_time)
             except Exception as e:
                 self.plugin.logger.info(
                     'cache server has returned error. Requesting from main API')
@@ -85,13 +114,18 @@ class ExchangeRates():
                 if not self.has_custom_app_id():
                     return False
                 self._currencies, update_time = self.expensive_service.load_from_url()
+                self.last_update = datetime.now()
 
-            if (time_diff.total_seconds() > 3600 * 2):
+            # `age` stays None when the cache server failed and we already fell
+            # back to the paid API. Reading it unconditionally used to raise
+            # NameError here and throw away the rates we had just fetched.
+            if age is not None and age.total_seconds() > 3600 * 2:
                 self.plugin.logger.info(
                     'cache server is more than 2 hours old. Requesting from main API')
                 if not self.has_custom_app_id():
                     return False
                 self._currencies, update_time = self.expensive_service.load_from_url()
+                self.last_update = datetime.now()
 
             self.save_to_file()
             self.error = None
@@ -111,16 +145,12 @@ class ExchangeRates():
         return False
 
     def load_from_file(self):
-        with open(self._file_path) as f:
+        with open(self._file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
         self.last_update = datetime.strptime(
             data['last_update'], '%Y-%m-%dT%H:%M:%S')
         self._currencies = data['rates']
-        self._load_secondary_data()
-
-    def _load_secondary_data(self):
-        pass
 
     def save_to_file(self):
         data = {
@@ -128,57 +158,68 @@ class ExchangeRates():
             'last_update': self.last_update.strftime('%Y-%m-%dT%H:%M:%S')
         }
 
-        with open(self._file_path, 'w') as f:
+        with open(self._file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f)
 
     def rate(self, code):
+        code = normalize_code(code)
         if code == 'USD':
             return 1
+        elif code in self._aliases:
+            return self.rate(self._aliases[code])
         else:
-            if code in self._aliases:
-                return self.rate(self._aliases[code])
-            else:
-                return self._currencies[code]['price']
+            return self._currencies[code]['price']
 
     def name(self, code):
+        code = normalize_code(code)
         if code in self._aliases:
             return self.name(self._aliases[code])
         else:
             return self._currencies[code]['name']
 
-    def format_codes(self, codeString):
-        lst = [x.strip() for x in codeString.split(',')]
-        return lst
+    def knows(self, code):
+        return code in self._currencies or code in self._aliases
 
     def clear_aliases(self):
         self._aliases.clear()
 
     def validate_alias(self, alias):
-        validated = alias.upper()
-        if len(validated) < 1:
-            return None
+        """Return (normalized_alias, reason).
+
+        `reason` is None when the alias is usable, and otherwise explains the
+        rejection so the caller can tell the user instead of dropping it silently.
+        """
+        validated = normalize_code(alias)
+        if not validated:
+            return None, 'it is empty'
         elif validated in self._currencies:
-            return None
+            return None, 'it is already a real currency code'
         elif validated in self._aliases:
-            return None
+            return None, 'it is already used for {}'.format(self._aliases[validated])
         elif re.search(r'\d', validated):
-            return None
+            return None, 'aliases cannot contain digits'
         else:
-            return validated
+            return validated, None
 
     def add_alias(self, alias, forCurrency):
-        validatedCurrency = self.validate_code(forCurrency)
-        self._aliases[alias] = validatedCurrency
+        self._aliases[normalize_code(alias)] = self.validate_code(forCurrency)
 
     def validate_code(self, codeString, raiseOnNone=False):
         if codeString is None:
             if raiseOnNone:
                 raise CurrencyError(None)
             return self.default_cur_in
-        elif codeString.upper() in self._currencies or codeString.upper() in self._aliases:
-            return codeString.upper()
-        else:
-            raise CurrencyError(codeString)
+
+        code = normalize_code(codeString)
+        if self.knows(code):
+            return code
+        if not self._currencies:
+            # Rates were never loaded, so there is nothing to validate against.
+            # Accept the code rather than discarding the user's configuration:
+            # no conversion can run in this state anyway, and the missing-rates
+            # error is reported separately.
+            return code
+        raise CurrencyError(codeString)
 
     def format_number(self, number, fullDigits=False):
         if fullDigits:
@@ -217,17 +258,32 @@ class ExchangeRates():
         return results
 
     def set_default_cur_in(self, string):
-        code = string.upper()
-        if code in self._currencies.keys():
+        code = normalize_code(string)
+        if not code:
+            return False
+        if self.knows(code) or not self._currencies:
             self.default_cur_in = code
             return True
-        else:
-            return False
+        return False
 
     def set_default_curs_out(self, string):
-        lst = string.split()
-        curs = [x.upper() for x in lst if x.upper() in self._currencies.keys()]
-        if len(lst) != len(curs):
-            return False
-        self.default_curs_out = curs
-        return True
+        """Keep the codes we recognize and report the rest.
+
+        Returns (accepted, rejected). This used to be all-or-nothing, so a single
+        unrecognized token - a trailing comma in 'USD, EUR, JPY' was enough -
+        threw the whole list away and reverted to the built-in default.
+        """
+        tokens = [t for t in re.split(r'[\s,;]+', str(string).strip()) if t]
+        optimistic = not self._currencies
+        accepted = []
+        rejected = []
+        for token in tokens:
+            code = normalize_code(token)
+            if self.knows(code) or optimistic:
+                if code not in accepted:
+                    accepted.append(code)
+            else:
+                rejected.append(token)
+        if accepted:
+            self.default_curs_out = accepted
+        return accepted, rejected
